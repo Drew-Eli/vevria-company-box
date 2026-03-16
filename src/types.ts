@@ -19,6 +19,7 @@ export interface TaskInput {
   model: string;
   callback_url: string;
   kanban_state: string;
+  box_id?: string;  // DB UUID from pool manager
 }
 
 export interface TaskResult {

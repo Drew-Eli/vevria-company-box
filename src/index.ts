@@ -129,7 +129,7 @@ app.post("/task", async (req, res) => {
   }
 
   try {
-    const result = await runAgent(input, claudeMd, boxId);
+    const result = await runAgent(input, claudeMd, input.box_id || boxId);
     tasksCompleted++;
     currentTask = null;
     state = "idle";
@@ -148,7 +148,7 @@ app.post("/task", async (req, res) => {
       await reportResult(input.callback_url, {
         task_id: input.task_id,
         company_id: input.company_id,
-        box_id: boxId,
+        box_id: input.box_id || boxId,
         status: "error",
         summary: `Box error: ${msg.slice(0, 300)}`,
         code_pushed: false,
