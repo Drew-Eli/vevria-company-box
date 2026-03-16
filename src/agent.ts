@@ -1,7 +1,7 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { execSync } from "child_process";
 import type { TaskInput, TaskResult } from "./types.js";
-import { startProxy } from "./proxy.js";
+import { startProxy, setTargetModel, setApiKey } from "./proxy.js";
 
 let proxyPort: number | null = null;
 
@@ -25,15 +25,20 @@ export async function runAgent(
 
   // Start the OpenRouter proxy if not already running
   if (!proxyPort) {
+    setApiKey(process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY || "");
     proxyPort = await startProxy();
   }
 
+  // Route to the user's selected model (could be GPT-4o, Gemini, etc.)
+  // Claude Code thinks it's using claude-sonnet-4-6, but the proxy swaps it
+  const model = task.model || "anthropic/claude-sonnet-4-6";
+  setTargetModel(model);
+
   console.log(`[agent] Starting task: ${task.title}`);
-  console.log(`[agent] Model: ${task.model}`);
-  console.log(`[agent] Proxy: http://127.0.0.1:${proxyPort}`);
+  console.log(`[agent] Model: ${model} (via proxy)`);
   console.log(`[agent] Working directory: /workspace`);
 
-  // Point Claude Code at our proxy which rewrites model names for OpenRouter
+  // Point Claude Code at our proxy
   process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
   process.env.ANTHROPIC_API_KEY = "proxied"; // proxy injects real key
 

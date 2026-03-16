@@ -1,21 +1,28 @@
 /**
- * Local proxy that sits between Claude Code and OpenRouter.
- * Rewrites model names: "claude-sonnet-4-6" → "anthropic/claude-sonnet-4-6"
- * Also handles the /v1/models endpoint to return Anthropic-compatible format.
+ * Local proxy between Claude Code and OpenRouter.
+ *
+ * Claude Code only knows Anthropic models. This proxy:
+ * 1. Fakes /v1/models so Claude Code thinks claude-sonnet-4-6 is available
+ * 2. Intercepts POST /v1/messages and swaps the model to whatever the user selected
+ * 3. Forwards to OpenRouter which routes to the actual model
+ *
+ * This means ANY model on OpenRouter works — Claude, GPT-4o, Gemini, Llama, etc.
+ * Claude Code is none the wiser.
  */
 import http from "http";
 import https from "https";
 
-const UPSTREAM = process.env.OPENROUTER_URL || "https://openrouter.ai";
-const API_KEY = process.env.OPENROUTER_API_KEY || "";
+let targetModel = "anthropic/claude-sonnet-4-6";
+let apiKey = "";
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || "3100");
 
-// Model name mapping: Claude Code sends bare names, OpenRouter needs anthropic/ prefix
-function rewriteModel(model: string): string {
-  if (model.includes("/")) return model; // already has provider prefix
-  // Map Claude Code's model names to OpenRouter IDs
-  if (model.startsWith("claude-")) return `anthropic/${model}`;
-  return model;
+export function setTargetModel(model: string) {
+  targetModel = model;
+  console.log(`[proxy] Target model: ${targetModel}`);
+}
+
+export function setApiKey(key: string) {
+  apiKey = key;
 }
 
 export function startProxy(): Promise<number> {
@@ -24,85 +31,66 @@ export function startProxy(): Promise<number> {
       const chunks: Buffer[] = [];
       req.on("data", (c) => chunks.push(c));
       req.on("end", () => {
-        let body = Buffer.concat(chunks);
+        const body = Buffer.concat(chunks);
 
-        // Rewrite model name in request body
+        // Fake /v1/models — tell Claude Code its model exists
+        if (req.url?.includes("/models")) {
+          const fake = JSON.stringify({
+            data: [
+              { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", type: "model" },
+              { id: "claude-opus-4-6", display_name: "Claude Opus 4.6", type: "model" },
+              { id: "claude-haiku-4-5", display_name: "Claude Haiku 4.5", type: "model" },
+            ],
+          });
+          res.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(fake) });
+          res.end(fake);
+          return;
+        }
+
+        // For message requests, swap the model
+        let newBody = body;
         if (req.method === "POST" && body.length > 0) {
           try {
             const json = JSON.parse(body.toString());
             if (json.model) {
-              json.model = rewriteModel(json.model);
-              body = Buffer.from(JSON.stringify(json));
+              json.model = targetModel;
+              newBody = Buffer.from(JSON.stringify(json));
             }
-          } catch { /* not JSON, pass through */ }
+          } catch { /* pass through */ }
         }
 
-        const upstreamUrl = new URL(UPSTREAM);
-        const options: https.RequestOptions = {
-          hostname: upstreamUrl.hostname,
-          port: upstreamUrl.port || 443,
-          path: `/api${req.url}`, // OpenRouter expects /api/v1/messages, Claude sends /v1/messages
+        // Forward to OpenRouter
+        const opts: https.RequestOptions = {
+          hostname: "openrouter.ai",
+          port: 443,
+          path: `/api${req.url}`,
           method: req.method,
           headers: {
-            ...req.headers,
-            host: upstreamUrl.hostname,
-            "content-length": body.length,
-            "x-api-key": API_KEY,
-            "authorization": `Bearer ${API_KEY}`,
+            "content-type": "application/json",
+            "content-length": newBody.length,
+            "authorization": `Bearer ${apiKey}`,
+            "anthropic-version": (req.headers["anthropic-version"] as string) || "2023-06-01",
+            "host": "openrouter.ai",
           },
         };
 
-        // Remove hop-by-hop headers
-        const h = options.headers as Record<string, unknown>;
-        delete h["connection"];
-        delete h["transfer-encoding"];
-
-        const proxyReq = https.request(options, (proxyRes) => {
-          // For /v1/models endpoint, rewrite response to Anthropic format
-          if (req.url?.includes("/models")) {
-            const responseChunks: Buffer[] = [];
-            proxyRes.on("data", (c) => responseChunks.push(c));
-            proxyRes.on("end", () => {
-              try {
-                const data = JSON.parse(Buffer.concat(responseChunks).toString());
-                // Build Anthropic-compatible models response
-                // Claude Code just needs to find its model in the list
-                const models = (data.data || [])
-                  .filter((m: { id: string }) => m.id.startsWith("anthropic/"))
-                  .map((m: { id: string; name?: string }) => ({
-                    id: m.id.replace("anthropic/", ""),
-                    display_name: m.name || m.id,
-                    type: "model",
-                  }));
-                const response = JSON.stringify({ data: models });
-                res.writeHead(200, {
-                  "content-type": "application/json",
-                  "content-length": Buffer.byteLength(response),
-                });
-                res.end(response);
-              } catch {
-                res.writeHead(proxyRes.statusCode || 500);
-                res.end(Buffer.concat(responseChunks));
-              }
-            });
-          } else {
-            res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
-            proxyRes.pipe(res);
-          }
+        const proxyReq = https.request(opts, (proxyRes) => {
+          res.writeHead(proxyRes.statusCode || 200, proxyRes.headers);
+          proxyRes.pipe(res);
         });
 
         proxyReq.on("error", (err) => {
-          console.error("[proxy] Upstream error:", err.message);
+          console.error("[proxy] Error:", err.message);
           res.writeHead(502);
           res.end(JSON.stringify({ error: err.message }));
         });
 
-        proxyReq.end(body);
+        proxyReq.end(newBody);
       });
     });
 
     server.listen(PROXY_PORT, "127.0.0.1", () => {
-      console.log(`[proxy] OpenRouter proxy listening on 127.0.0.1:${PROXY_PORT}`);
+      console.log(`[proxy] Listening on 127.0.0.1:${PROXY_PORT} → ${targetModel}`);
       resolve(PROXY_PORT);
     });
   });
