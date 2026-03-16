@@ -1,6 +1,9 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { execSync } from "child_process";
 import type { TaskInput, TaskResult } from "./types.js";
+import { startProxy } from "./proxy.js";
+
+let proxyPort: number | null = null;
 
 /**
  * Run the CEO agent for a task using Claude Agent SDK.
@@ -20,9 +23,19 @@ export async function runAgent(
 
   const prompt = buildPrompt(task);
 
+  // Start the OpenRouter proxy if not already running
+  if (!proxyPort) {
+    proxyPort = await startProxy();
+  }
+
   console.log(`[agent] Starting task: ${task.title}`);
   console.log(`[agent] Model: ${task.model}`);
+  console.log(`[agent] Proxy: http://127.0.0.1:${proxyPort}`);
   console.log(`[agent] Working directory: /workspace`);
+
+  // Point Claude Code at our proxy which rewrites model names for OpenRouter
+  process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+  process.env.ANTHROPIC_API_KEY = "proxied"; // proxy injects real key
 
   // Snapshot git HEAD before agent runs
   let headBefore = "";
