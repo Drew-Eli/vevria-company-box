@@ -14,6 +14,7 @@ let state: BoxState = "warm";
 let companyId: string | null = null;
 let companySlug: string | null = null;
 let currentModel: string = "anthropic/claude-sonnet-4";
+let boxId: string = process.env.BOX_ID || `box-${Date.now()}`;
 let currentTask: string | null = null;
 let claudeMd: string = "";
 let tasksCompleted = 0;
@@ -128,7 +129,7 @@ app.post("/task", async (req, res) => {
   }
 
   try {
-    const result = await runAgent(input, claudeMd);
+    const result = await runAgent(input, claudeMd, boxId);
     tasksCompleted++;
     currentTask = null;
     state = "idle";
@@ -146,11 +147,16 @@ app.post("/task", async (req, res) => {
     if (input.callback_url) {
       await reportResult(input.callback_url, {
         task_id: input.task_id,
-        status: "failed",
-        description: `Box error: ${msg.slice(0, 300)}`,
-        tokens_used: 0,
+        company_id: input.company_id,
+        box_id: boxId,
+        status: "error",
+        summary: `Box error: ${msg.slice(0, 300)}`,
+        code_pushed: false,
+        branch: "main",
+        tokens_in: 0,
+        tokens_out: 0,
         cost: 0,
-        files_changed: 0,
+        duration_ms: 0,
       });
     }
   }

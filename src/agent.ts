@@ -1,5 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import fs from "fs";
+import { execSync } from "child_process";
 import type { TaskInput, TaskResult } from "./types.js";
 
 /**
@@ -9,18 +9,26 @@ import type { TaskInput, TaskResult } from "./types.js";
  */
 export async function runAgent(
   task: TaskInput,
-  claudeMd: string
+  claudeMd: string,
+  boxId: string
 ): Promise<TaskResult> {
   const startTime = Date.now();
-  let tokensUsed = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
   let resultText = "";
-  let filesChanged = 0;
+  let codePushed = false;
 
   const prompt = buildPrompt(task);
 
   console.log(`[agent] Starting task: ${task.title}`);
   console.log(`[agent] Model: ${task.model}`);
   console.log(`[agent] Working directory: /workspace`);
+
+  // Snapshot git HEAD before agent runs
+  let headBefore = "";
+  try {
+    headBefore = execSync("git -C /workspace rev-parse HEAD 2>/dev/null || echo none", { encoding: "utf8" }).trim();
+  } catch { /* ignore */ }
 
   try {
     for await (const message of query({
@@ -55,34 +63,50 @@ export async function runAgent(
         console.log(`[agent] Result: ${resultText.slice(0, 200)}`);
       }
 
-      // Track token usage from assistant messages
       if (message.type === "assistant") {
         const msg = message as { message?: { usage?: { input_tokens?: number; output_tokens?: number } } };
         if (msg.message?.usage) {
-          tokensUsed += (msg.message.usage.input_tokens || 0) + (msg.message.usage.output_tokens || 0);
+          tokensIn += msg.message.usage.input_tokens || 0;
+          tokensOut += msg.message.usage.output_tokens || 0;
         }
       }
     }
 
-    // Count changed files
+    // Check if code was pushed by comparing HEAD
     try {
-      const gitStatus = await runBash("git status --porcelain", "/workspace");
-      filesChanged = gitStatus.split("\n").filter((l) => l.trim()).length;
-    } catch {
-      filesChanged = 0;
-    }
+      const headAfter = execSync("git -C /workspace rev-parse HEAD 2>/dev/null || echo none", { encoding: "utf8" }).trim();
+      codePushed = headAfter !== headBefore && headAfter !== "none";
+      // Also check if there are unpushed commits
+      if (!codePushed) {
+        const unpushed = execSync("git -C /workspace log origin/main..HEAD --oneline 2>/dev/null || echo ''", { encoding: "utf8" }).trim();
+        if (unpushed) {
+          // Agent committed but didn't push — push for it
+          try {
+            execSync("git -C /workspace push", { timeout: 30000 });
+            codePushed = true;
+            console.log("[agent] Auto-pushed unpushed commits");
+          } catch { /* ignore push failure */ }
+        }
+      }
+    } catch { /* ignore */ }
 
+    const durationMs = Date.now() - startTime;
     console.log(
-      `[agent] Task completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, ${tokensUsed} tokens, ${filesChanged} files changed`
+      `[agent] Task completed in ${(durationMs / 1000).toFixed(1)}s, ${tokensIn + tokensOut} tokens, pushed=${codePushed}`
     );
 
     return {
       task_id: task.task_id,
-      status: "completed",
-      description: resultText.slice(0, 500) || `Completed: ${task.title}`,
-      tokens_used: tokensUsed,
-      cost: 0, // Pool manager calculates from token count
-      files_changed: filesChanged,
+      company_id: task.company_id,
+      box_id: boxId,
+      status: "success",
+      summary: resultText.slice(0, 500) || `Completed: ${task.title}`,
+      code_pushed: codePushed,
+      branch: "main",
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
+      cost: 0,
+      duration_ms: durationMs,
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
@@ -90,11 +114,16 @@ export async function runAgent(
 
     return {
       task_id: task.task_id,
-      status: "failed",
-      description: `Failed: ${errorMsg.slice(0, 300)}`,
-      tokens_used: tokensUsed,
+      company_id: task.company_id,
+      box_id: boxId,
+      status: "error",
+      summary: `Failed: ${errorMsg.slice(0, 300)}`,
+      code_pushed: false,
+      branch: "main",
+      tokens_in: tokensIn,
+      tokens_out: tokensOut,
       cost: 0,
-      files_changed: 0,
+      duration_ms: Date.now() - startTime,
     };
   }
 }
@@ -118,14 +147,4 @@ ${task.description}
 
 ## Current Kanban Board
 ${task.kanban_state || "No tasks loaded yet."}`;
-}
-
-function runBash(cmd: string, cwd: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const { exec } = require("child_process");
-    exec(cmd, { cwd }, (err: Error | null, stdout: string, stderr: string) => {
-      if (err) reject(err);
-      else resolve(stdout);
-    });
-  });
 }

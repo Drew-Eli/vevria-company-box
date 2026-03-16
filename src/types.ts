@@ -23,11 +23,16 @@ export interface TaskInput {
 
 export interface TaskResult {
   task_id: string;
-  status: "completed" | "failed";
-  description: string;
-  tokens_used: number;
+  company_id: string;
+  box_id: string;
+  status: string;
+  summary: string;
+  code_pushed: boolean;
+  branch: string;
+  tokens_in: number;
+  tokens_out: number;
   cost: number;
-  files_changed: number;
+  duration_ms: number;
 }
 
 export interface BoxStatus {
